@@ -569,6 +569,288 @@ app.get('/api/basureros/:codigo/conexiones', async (req, res) => {
     }
 });
 
+
+
+
+// ==================== DETECCIONES ====================
+
+// ==================== DETECCIONES ====================
+
+// Guardar una nueva detección
+app.post('/api/detecciones', async (req, res) => {
+  try {
+    const {
+      id_usuario,
+      id_basurero,
+      id_categoria,
+      nombre_objeto,
+      confianza,
+      peso_gramos,
+      puntos_ganados,
+      foto,
+      latitud,
+      longitud
+    } = req.body;
+
+    // Validaciones básicas
+    if (!id_usuario) {
+      return res.status(400).json({
+        success: false,
+        error: 'id_usuario es obligatorio'
+      });
+    }
+
+    if (!id_categoria) {
+      return res.status(400).json({
+        success: false,
+        error: 'id_categoria es obligatoria'
+      });
+    }
+
+    if (!nombre_objeto) {
+      return res.status(400).json({
+        success: false,
+        error: 'nombre_objeto es obligatorio'
+      });
+    }
+
+    // Puntos por defecto si no viene en el body
+    const puntos = puntos_ganados ?? 10;
+
+    console.log('💾 Guardando detección...', {
+      id_usuario,
+      id_basurero,
+      id_categoria,
+      nombre_objeto,
+      confianza,
+      peso_gramos,
+      puntos_ganados: puntos,
+      latitud,
+      longitud
+    });
+
+    // Insertar detección en la tabla
+    const [result] = await poolPromise.execute(
+      `INSERT INTO detecciones (
+        id_usuario,
+        id_basurero,
+        id_categoria,
+        nombre_objeto,
+        confianza,
+        peso_gramos,
+        puntos_ganados,
+        foto,
+        latitud,
+        longitud
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id_usuario,
+        id_basurero || null,
+        id_categoria,
+        nombre_objeto,
+        confianza ?? null,
+        peso_gramos ?? null,
+        puntos,
+        foto || null,
+        latitud ?? null,
+        longitud ?? null
+      ]
+    );
+
+    // Obtener la detección insertada (para devolver fecha_deteccion)
+    const [rows] = await poolPromise.execute(
+      `SELECT id_deteccion, fecha_deteccion
+       FROM detecciones
+       WHERE id_deteccion = ?`,
+      [result.insertId]
+    );
+
+    const insercion = rows[0];
+
+    return res.status(201).json({
+      success: true,
+      message: 'Detección guardada exitosamente',
+      data: {
+        id_deteccion: insercion.id_deteccion,
+        fecha_deteccion: insercion.fecha_deteccion,
+        puntos_ganados: puntos
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error al guardar detección:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Error al guardar detección',
+      details: error.message
+    });
+  }
+});
+
+
+// Obtener historial de detecciones de un usuario
+app.get('/api/detecciones/usuario/:id_usuario', async (req, res) => {
+    try {
+        const { id_usuario } = req.params;
+        const { tipo, limit = 50 } = req.query;
+
+        let query = `
+            SELECT 
+                id_deteccion,
+                tipo_residuo,
+                nombre_objeto,
+                confianza,
+                peso_gramos,
+                puntos_ganados,
+                foto,
+                latitud,
+                longitud,
+                fecha_deteccion
+            FROM detecciones
+            WHERE id_usuario = ?
+        `;
+
+        const params = [id_usuario];
+
+        // Si hay filtro por tipo
+        if (tipo && ['organico', 'inorganico', 'reciclable'].includes(tipo.toLowerCase())) {
+            query += ` AND tipo_residuo = ?`;
+            params.push(tipo.toLowerCase());
+        }
+
+        query += ` ORDER BY fecha_deteccion DESC LIMIT ?`;
+        params.push(parseInt(limit));
+
+        const [datos] = await poolPromise.execute(query, params);
+
+        res.json({
+            success: true,
+            total: datos.length,
+            data: datos
+        });
+    } catch (error) {
+        console.error('Error al obtener detecciones:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Error al obtener historial de detecciones',
+            details: error.message
+        });
+    }
+});
+
+// ==================== ESTADÍSTICAS ====================
+
+// Obtener estadísticas generales de un usuario
+app.get('/api/detecciones/estadisticas/:id_usuario', async (req, res) => {
+    try {
+        const { id_usuario } = req.params;
+
+        // Total de detecciones
+        const [totalResult] = await poolPromise.execute(
+            'SELECT COUNT(*) as total FROM detecciones WHERE id_usuario = ?',
+            [id_usuario]
+        );
+
+        // Detecciones por tipo
+        const [porTipo] = await poolPromise.execute(
+            `SELECT 
+                tipo_residuo,
+                COUNT(*) as cantidad,
+                SUM(puntos_ganados) as puntos_totales
+            FROM detecciones
+            WHERE id_usuario = ?
+            GROUP BY tipo_residuo`,
+            [id_usuario]
+        );
+
+        // Puntos totales
+        const [puntosResult] = await poolPromise.execute(
+            'SELECT SUM(puntos_ganados) as puntos_totales FROM detecciones WHERE id_usuario = ?',
+            [id_usuario]
+        );
+
+        // Promedio de confianza
+        const [confianzaResult] = await poolPromise.execute(
+            'SELECT AVG(confianza) as confianza_promedio FROM detecciones WHERE id_usuario = ?',
+            [id_usuario]
+        );
+
+        res.json({
+            success: true,
+            data: {
+                total_detecciones: totalResult[0].total,
+                puntos_totales: puntosResult[0].puntos_totales || 0,
+                confianza_promedio: Math.round(confianzaResult[0].confianza_promedio || 0),
+                por_tipo: porTipo
+            }
+        });
+    } catch (error) {
+        console.error('Error al obtener estadísticas:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Error al obtener estadísticas',
+            details: error.message
+        });
+    }
+});
+
+// ==================== USUARIOS ====================
+
+// ==================== USUARIOS ====================
+
+// Obtener todos los usuarios
+app.get('/api/usuarios', async (req, res) => {
+    try {
+        const [usuarios] = await poolPromise.execute(
+            `SELECT 
+                id_usuario, 
+                nombre, 
+                apellido, 
+                correo, 
+                id_rol, 
+                id_estado, 
+                fecha_creacion
+             FROM usuarios
+             ORDER BY fecha_creacion DESC`
+        );
+
+        res.json({
+            success: true,
+            total: usuarios.length,
+            data: usuarios
+        });
+    } catch (error) {
+        console.error('Error al obtener usuarios:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Error al obtener usuarios',
+            details: error.message
+        });
+    }
+});
+
+
+// ==================== HEALTH CHECK ====================
+app.get('/api/health', async (req, res) => {
+    try {
+        const [result] = await poolPromise.execute('SELECT 1 + 1 AS resultado');
+        res.json({
+            success: true,
+            message: 'Conexión a MySQL exitosa',
+            database: 'db_separapp',
+            test: result[0].resultado
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: 'Error de conexión a MySQL',
+            details: error.message
+        });
+    }
+});
+
+// ==================== PANEL DE ESTADO ====================
+
 // ==================== ESTADÍSTICAS DEL BASURERO ====================
 
 // Obtener estadísticas de un basurero específico
@@ -814,279 +1096,6 @@ app.get('/api/panel/combinado/:id_usuario', async (req, res) => {
         });
     }
 });
-
-
-
-
-// ==================== DETECCIONES ====================
-
-// ==================== DETECCIONES ====================
-
-// Guardar una nueva detección
-app.post('/api/detecciones', async (req, res) => {
-  try {
-    const {
-      id_usuario,
-      id_basurero,
-      id_categoria,
-      nombre_objeto,
-      confianza,
-      peso_gramos,
-      puntos_ganados,
-      foto,
-      latitud,
-      longitud
-    } = req.body;
-
-    // Validaciones básicas
-    if (!id_usuario) {
-      return res.status(400).json({
-        success: false,
-        error: 'id_usuario es obligatorio'
-      });
-    }
-
-    if (!id_categoria) {
-      return res.status(400).json({
-        success: false,
-        error: 'id_categoria es obligatoria'
-      });
-    }
-
-    if (!nombre_objeto) {
-      return res.status(400).json({
-        success: false,
-        error: 'nombre_objeto es obligatorio'
-      });
-    }
-
-    // Puntos por defecto si no viene en el body
-    const puntos = puntos_ganados ?? 10;
-
-    console.log('💾 Guardando detección...', {
-      id_usuario,
-      id_basurero,
-      id_categoria,
-      nombre_objeto,
-      confianza,
-      peso_gramos,
-      puntos_ganados: puntos,
-      latitud,
-      longitud
-    });
-
-    // Insertar detección en la tabla
-    const [result] = await poolPromise.execute(
-      `INSERT INTO detecciones (
-        id_usuario,
-        id_basurero,
-        id_categoria,
-        nombre_objeto,
-        confianza,
-        peso_gramos,
-        puntos_ganados,
-        foto,
-        latitud,
-        longitud
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        id_usuario,
-        id_basurero || null,
-        id_categoria,
-        nombre_objeto,
-        confianza ?? null,
-        peso_gramos ?? null,
-        puntos,
-        foto || null,
-        latitud ?? null,
-        longitud ?? null
-      ]
-    );
-
-    // Obtener la detección insertada (para devolver fecha_deteccion)
-    const [rows] = await poolPromise.execute(
-      `SELECT id_deteccion, fecha_deteccion
-       FROM detecciones
-       WHERE id_deteccion = ?`,
-      [result.insertId]
-    );
-
-    const insercion = rows[0];
-
-    return res.status(201).json({
-      success: true,
-      message: 'Detección guardada exitosamente',
-      data: {
-        id_deteccion: insercion.id_deteccion,
-        fecha_deteccion: insercion.fecha_deteccion,
-        puntos_ganados: puntos
-      }
-    });
-
-  } catch (error) {
-    console.error('❌ Error al guardar detección:', error);
-    return res.status(500).json({
-      success: false,
-      error: 'Error al guardar detección',
-      details: error.message
-    });
-  }
-});
-
-
-// Obtener historial de detecciones de un usuario
-app.get('/api/detecciones/usuario/:id_usuario', async (req, res) => {
-    try {
-        const { id_usuario } = req.params;
-        const { tipo, limit = 50 } = req.query;
-
-        let query = `
-            SELECT 
-                id_deteccion,
-                tipo_residuo,
-                nombre_objeto,
-                confianza,
-                peso_gramos,
-                puntos_ganados,
-                foto,
-                latitud,
-                longitud,
-                fecha_deteccion
-            FROM detecciones
-            WHERE id_usuario = ?
-        `;
-
-        const params = [id_usuario];
-
-        // Si hay filtro por tipo
-        if (tipo && ['organico', 'inorganico', 'reciclable'].includes(tipo.toLowerCase())) {
-            query += ` AND tipo_residuo = ?`;
-            params.push(tipo.toLowerCase());
-        }
-
-        query += ` ORDER BY fecha_deteccion DESC LIMIT ?`;
-        params.push(parseInt(limit));
-
-        const [datos] = await poolPromise.execute(query, params);
-
-        res.json({
-            success: true,
-            total: datos.length,
-            data: datos
-        });
-    } catch (error) {
-        console.error('Error al obtener detecciones:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Error al obtener historial de detecciones',
-            details: error.message
-        });
-    }
-});
-
-// ==================== ESTADÍSTICAS ====================
-
-// Obtener estadísticas generales de un usuario
-app.get('/api/detecciones/estadisticas/:id_usuario', async (req, res) => {
-    try {
-        const { id_usuario } = req.params;
-
-        // Total de detecciones
-        const [totalResult] = await poolPromise.execute(
-            'SELECT COUNT(*) as total FROM detecciones WHERE id_usuario = ?',
-            [id_usuario]
-        );
-
-        // Detecciones por tipo
-        const [porTipo] = await poolPromise.execute(
-            `SELECT 
-                tipo_residuo,
-                COUNT(*) as cantidad,
-                SUM(puntos_ganados) as puntos_totales
-            FROM detecciones
-            WHERE id_usuario = ?
-            GROUP BY tipo_residuo`,
-            [id_usuario]
-        );
-
-        // Puntos totales
-        const [puntosResult] = await poolPromise.execute(
-            'SELECT SUM(puntos_ganados) as puntos_totales FROM detecciones WHERE id_usuario = ?',
-            [id_usuario]
-        );
-
-        // Promedio de confianza
-        const [confianzaResult] = await poolPromise.execute(
-            'SELECT AVG(confianza) as confianza_promedio FROM detecciones WHERE id_usuario = ?',
-            [id_usuario]
-        );
-
-        res.json({
-            success: true,
-            data: {
-                total_detecciones: totalResult[0].total,
-                puntos_totales: puntosResult[0].puntos_totales || 0,
-                confianza_promedio: Math.round(confianzaResult[0].confianza_promedio || 0),
-                por_tipo: porTipo
-            }
-        });
-    } catch (error) {
-        console.error('Error al obtener estadísticas:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Error al obtener estadísticas',
-            details: error.message
-        });
-    }
-});
-
-// ==================== USUARIOS ====================
-
-// Obtener todos los usuarios
-app.get('/api/usuarios', async (req, res) => {
-    try {
-        const [usuarios] = await poolPromise.execute(
-            `SELECT 
-                id_usuario, nombre, apellido, correo, id_rol, id_estado, fecha_registro
-            FROM usuarios
-            ORDER BY fecha_registro DESC`
-        );
-
-        res.json({
-            success: true,
-            total: usuarios.length,
-            data: usuarios
-        });
-    } catch (error) {
-        console.error('Error al obtener usuarios:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Error al obtener usuarios',
-            details: error.message
-        });
-    }
-});
-
-// ==================== HEALTH CHECK ====================
-app.get('/api/health', async (req, res) => {
-    try {
-        const [result] = await poolPromise.execute('SELECT 1 + 1 AS resultado');
-        res.json({
-            success: true,
-            message: 'Conexión a MySQL exitosa',
-            database: 'db_separapp',
-            test: result[0].resultado
-        });
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            error: 'Error de conexión a MySQL',
-            details: error.message
-        });
-    }
-});
-
-// ==================== PANEL DE ESTADO ====================
 
 // Obtener datos para el panel de estado
 app.get('/api/panel/estado/:id_usuario', async (req, res) => {
