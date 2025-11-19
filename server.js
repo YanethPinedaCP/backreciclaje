@@ -569,6 +569,252 @@ app.get('/api/basureros/:codigo/conexiones', async (req, res) => {
     }
 });
 
+// ==================== ESTADÍSTICAS DEL BASURERO ====================
+
+// Obtener estadísticas de un basurero específico
+app.get('/api/basureros/:id_basurero/estadisticas', async (req, res) => {
+    try {
+        const { id_basurero } = req.params;
+
+        console.log(`📊 Obteniendo estadísticas del basurero ${id_basurero}`);
+
+        // Obtener información básica del basurero
+        const [basurero] = await poolPromise.execute(
+            `SELECT 
+                id_basurero,
+                nombre,
+                codigo,
+                capacidad,
+                ubicacion,
+                id_estado
+            FROM basureros
+            WHERE id_basurero = ?
+            LIMIT 1`,
+            [id_basurero]
+        );
+
+        if (!basurero || basurero.length === 0) {
+            return res.status(404).json({
+                success: false,
+                error: 'Basurero no encontrado'
+            });
+        }
+
+        // Obtener total de detecciones en este basurero por categoría
+        const [deteccionesPorCategoria] = await poolPromise.execute(
+            `SELECT 
+                c.id_categoria,
+                c.nombre as categoria_nombre,
+                COUNT(d.id_deteccion) as total_detecciones,
+                COALESCE(SUM(d.peso_gramos), 0) as peso_total_gramos
+            FROM categorias c
+            LEFT JOIN detecciones d ON c.id_categoria = d.id_categoria 
+                AND d.id_basurero = ?
+            WHERE c.id_categoria IN (1, 2, 3, 4)
+            GROUP BY c.id_categoria, c.nombre
+            ORDER BY c.id_categoria`,
+            [id_basurero]
+        );
+
+        // Calcular porcentaje de llenado por categoría (simulado por ahora)
+        const capacidadTotal = basurero[0].capacidad || 1000; // kg
+        const capacidadPorCategoria = capacidadTotal / 3; // Dividido en 3 compartimentos
+
+        const estadisticas = deteccionesPorCategoria.map(cat => {
+            const pesoKg = cat.peso_total_gramos / 1000;
+            const porcentajeLlenado = Math.min(
+                Math.round((pesoKg / capacidadPorCategoria) * 100),
+                100
+            );
+
+            return {
+                id_categoria: cat.id_categoria,
+                nombre: cat.categoria_nombre,
+                total_detecciones: cat.total_detecciones,
+                peso_kg: Math.round(pesoKg * 100) / 100,
+                porcentaje_llenado: porcentajeLlenado
+            };
+        });
+
+        // Última detección en este basurero
+        const [ultimaDeteccion] = await poolPromise.execute(
+            `SELECT 
+                d.nombre_objeto,
+                c.nombre as categoria_nombre,
+                d.confianza,
+                d.fecha_deteccion,
+                u.nombre as usuario_nombre
+            FROM detecciones d
+            LEFT JOIN categorias c ON d.id_categoria = c.id_categoria
+            LEFT JOIN usuarios u ON d.id_usuario = u.id_usuario
+            WHERE d.id_basurero = ?
+            ORDER BY d.fecha_deteccion DESC
+            LIMIT 1`,
+            [id_basurero]
+        );
+
+        res.json({
+            success: true,
+            data: {
+                basurero: basurero[0],
+                estadisticas: estadisticas,
+                ultima_deteccion: ultimaDeteccion[0] || null,
+                capacidad_total_kg: capacidadTotal,
+                peso_total_kg: Math.round(
+                    deteccionesPorCategoria.reduce((sum, cat) => 
+                        sum + (cat.peso_total_gramos / 1000), 0
+                    ) * 100
+                ) / 100
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Error al obtener estadísticas del basurero:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Error al obtener estadísticas del basurero',
+            details: error.message
+        });
+    }
+});
+
+// ==================== PANEL COMBINADO (USUARIO + BASURERO) ====================
+
+app.get('/api/panel/combinado/:id_usuario', async (req, res) => {
+    try {
+        const { id_usuario } = req.params;
+        const { id_basurero } = req.query; // Opcional
+
+        console.log(`📊 Panel combinado - Usuario: ${id_usuario}, Basurero: ${id_basurero || 'ninguno'}`);
+
+        // 1. ESTADÍSTICAS DEL USUARIO (siempre)
+        const [cantidadesUsuario] = await poolPromise.execute(
+            `SELECT 
+                c.nombre as categoria_nombre,
+                COUNT(d.id_deteccion) as cantidad
+            FROM categorias c
+            LEFT JOIN detecciones d ON c.id_categoria = d.id_categoria 
+                AND d.id_usuario = ?
+            WHERE c.id_categoria IN (1, 2, 3, 4)
+            GROUP BY c.id_categoria, c.nombre
+            ORDER BY c.id_categoria`,
+            [id_usuario]
+        );
+
+        const [ultimaDeteccionUsuario] = await poolPromise.execute(
+            `SELECT 
+                c.nombre as categoria_nombre,
+                d.nombre_objeto,
+                d.confianza,
+                d.fecha_deteccion
+            FROM detecciones d
+            LEFT JOIN categorias c ON d.id_categoria = c.id_categoria
+            WHERE d.id_usuario = ?
+            ORDER BY d.fecha_deteccion DESC
+            LIMIT 1`,
+            [id_usuario]
+        );
+
+        const [acierto] = await poolPromise.execute(
+            `SELECT AVG(confianza) as porcentaje_acierto
+             FROM detecciones
+             WHERE id_usuario = ?`,
+            [id_usuario]
+        );
+
+        const resultadoUsuario = {
+            reciclable: 0,
+            organico: 0,
+            inorganico: 0,
+            peligroso: 0
+        };
+
+        cantidadesUsuario.forEach(item => {
+            const nombre = item.categoria_nombre.toLowerCase();
+            if (nombre.includes('recicl')) resultadoUsuario.reciclable = item.cantidad;
+            else if (nombre.includes('org')) resultadoUsuario.organico = item.cantidad;
+            else if (nombre.includes('inorg')) resultadoUsuario.inorganico = item.cantidad;
+            else if (nombre.includes('peligr')) resultadoUsuario.peligroso = item.cantidad;
+        });
+
+        const respuesta = {
+            success: true,
+            data: {
+                usuario: {
+                    cantidades: resultadoUsuario,
+                    total: Object.values(resultadoUsuario).reduce((a, b) => a + b, 0),
+                    ultima_deteccion: ultimaDeteccionUsuario[0] || null,
+                    porcentaje_acierto: Math.round(acierto[0]?.porcentaje_acierto || 0)
+                }
+            }
+        };
+
+        // 2. ESTADÍSTICAS DEL BASURERO (solo si hay id_basurero)
+        if (id_basurero) {
+            const [basurero] = await poolPromise.execute(
+                `SELECT nombre, codigo, capacidad FROM basureros WHERE id_basurero = ?`,
+                [id_basurero]
+            );
+
+            if (basurero && basurero.length > 0) {
+                const [deteccionesBasurero] = await poolPromise.execute(
+                    `SELECT 
+                        c.nombre as categoria_nombre,
+                        COUNT(d.id_deteccion) as total,
+                        COALESCE(SUM(d.peso_gramos), 0) as peso_gramos
+                    FROM categorias c
+                    LEFT JOIN detecciones d ON c.id_categoria = d.id_categoria 
+                        AND d.id_basurero = ?
+                    WHERE c.id_categoria IN (1, 2, 3)
+                    GROUP BY c.id_categoria, c.nombre
+                    ORDER BY c.id_categoria`,
+                    [id_basurero]
+                );
+
+                const capacidad = basurero[0].capacidad || 1000;
+                const capacidadPorCompartimento = capacidad / 3;
+
+                const llenadoBasurero = {
+                    reciclable: 0,
+                    organico: 0,
+                    inorganico: 0
+                };
+
+                deteccionesBasurero.forEach(det => {
+                    const nombre = det.categoria_nombre.toLowerCase();
+                    const pesoKg = det.peso_gramos / 1000;
+                    const porcentaje = Math.min(
+                        Math.round((pesoKg / capacidadPorCompartimento) * 100),
+                        100
+                    );
+
+                    if (nombre.includes('recicl')) llenadoBasurero.reciclable = porcentaje;
+                    else if (nombre.includes('org')) llenadoBasurero.organico = porcentaje;
+                    else if (nombre.includes('inorg')) llenadoBasurero.inorganico = porcentaje;
+                });
+
+                respuesta.data.basurero = {
+                    nombre: basurero[0].nombre,
+                    codigo: basurero[0].codigo,
+                    llenado: llenadoBasurero,
+                    capacidad_total: capacidad,
+                    estado: 'Operativo'
+                };
+            }
+        }
+
+        res.json(respuesta);
+
+    } catch (error) {
+        console.error('❌ Error en panel combinado:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Error al obtener panel combinado',
+            details: error.message
+        });
+    }
+});
+
 
 
 
