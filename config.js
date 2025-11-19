@@ -5,7 +5,7 @@ const dbConfig = {
     host: process.env.DB_HOST || 'localhost',
     user: process.env.DB_USER || 'root',
     password: process.env.DB_PASSWORD || '',
-    database: process.env.DB_DATABASE || 'separapp_bd',
+    database: process.env.DB_DATABASE || 'db_separapp',
     port: process.env.DB_PORT || 3306,
     waitForConnections: true,
     connectionLimit: 10,
@@ -14,6 +14,8 @@ const dbConfig = {
     enableKeepAlive: true,
     keepAliveInitialDelay: 0
 };
+
+
 
 console.log('🔧 Configurando conexión MySQL...');
 console.log(`   Host: ${dbConfig.host}`);
