@@ -9,23 +9,32 @@ const bcrypt = require('bcryptjs');
 const nodemailer = require('nodemailer');
 
 // Configuración del correo
+// Configuración del correo
 const transporter = nodemailer.createTransport({
     service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 587,
+    secure: false,
     auth: {
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASS
+    },
+    tls: {
+        rejectUnauthorized: false
     }
 });
 
-// Verificar conexión al iniciar
-transporter.verify((error, success) => {
-    if (error) {
-        console.log('❌ Error en configuración de correo:', error.message);
-    } else {
+// Verificar conexión al iniciar (sin bloquear)
+transporter.verify()
+    .then(() => {
         console.log('✅ Servidor de correo listo');
-    }
-});
+    })
+    .catch((error) => {
+        console.log('⚠️ Correo no configurado:', error.message);
+        console.log('💡 La app funcionará, pero sin envío de correos');
+    });
 
+    
 // Función para enviar correo
 async function enviarCorreoRecuperacion(correo, nombre, codigo) {
     const mailOptions = {
