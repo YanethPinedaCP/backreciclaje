@@ -3,9 +3,91 @@ const express = require('express');
 const cors = require('cors');
 const { poolPromise } = require('./config');
 require('dotenv').config();
+const jwt = require('jsonwebtoken');
 
 const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
+const nodemailer = require('nodemailer');
+
+// Configuración del correo
+const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS
+    }
+});
+
+// Verificar conexión al iniciar
+transporter.verify((error, success) => {
+    if (error) {
+        console.log('❌ Error en configuración de correo:', error.message);
+    } else {
+        console.log('✅ Servidor de correo listo');
+    }
+});
+
+// Función para enviar correo
+async function enviarCorreoRecuperacion(correo, nombre, codigo) {
+    const mailOptions = {
+        from: `"SeparAPP" <${process.env.EMAIL_USER}>`,
+        to: correo,
+        subject: '🔐 Código de recuperación - SeparAPP',
+        html: `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+                <div style="background: linear-gradient(135deg, #8EB69B 0%, #5D9E6A 100%); padding: 30px; border-radius: 15px 15px 0 0; text-align: center;">
+                    <h1 style="color: white; margin: 0;">🌿 SeparAPP</h1>
+                    <p style="color: rgba(255,255,255,0.9); margin-top: 10px;">Sistema de Reciclaje Inteligente</p>
+                </div>
+                
+                <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 15px 15px;">
+                    <h2 style="color: #333;">Hola ${nombre} 👋</h2>
+                    
+                    <p style="color: #666; font-size: 16px;">
+                        Recibimos una solicitud para restablecer tu contraseña. 
+                        Usa el siguiente código de verificación:
+                    </p>
+                    
+                    <div style="background: #8EB69B; color: white; font-size: 32px; font-weight: bold; text-align: center; padding: 20px; border-radius: 10px; letter-spacing: 8px; margin: 25px 0;">
+                        ${codigo}
+                    </div>
+                    
+                    <p style="color: #666; font-size: 14px;">
+                        ⏱️ Este código expira en <strong>10 minutos</strong>.
+                    </p>
+                    
+                    <p style="color: #999; font-size: 13px; margin-top: 30px;">
+                        Si no solicitaste este código, puedes ignorar este correo. 
+                        Tu cuenta está segura.
+                    </p>
+                    
+                    <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+                    
+                    <p style="color: #999; font-size: 12px; text-align: center;">
+                        © 2024 SeparAPP - Todos los derechos reservados<br>
+                        Este es un correo automático, por favor no respondas.
+                    </p>
+                </div>
+            </div>
+        `
+    };
+
+    try {
+        const info = await transporter.sendMail(mailOptions);
+        console.log('📧 Correo enviado:', info.messageId);
+        return true;
+    } catch (error) {
+        console.error('❌ Error al enviar correo:', error);
+        return false;
+    }
+}
+
+// Almacén temporal de códigos
+const codigosRecuperacion = new Map();
+
+// Generar código de 6 dígitos
+function generarCodigo() {
+    return Math.floor(100000 + Math.random() * 900000).toString();
+}
 
 const { JWT_ACCESS_SECRET, JWT_REFRESH_SECRET, ACCESS_EXPIRES, REFRESH_EXPIRES } = process.env;
 
@@ -237,6 +319,195 @@ app.post('/api/registro', async (req, res) => {
         return res.status(500).json({ 
             success: false, 
             error: 'Error al registrar usuario. Intenta nuevamente.' 
+        });
+    }
+});
+
+// ==================== RECUPERAR CONTRASEÑA ====================
+
+// Almacén temporal de códigos (en memoria)
+
+// Generar código de 6 dígitos
+function generarCodigo() {
+    return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+// 1. Solicitar código de recuperación
+// 1. Solicitar código de recuperación
+app.post('/api/recuperar/solicitar', async (req, res) => {
+    try {
+        const correo = String(req.body?.correo || '').trim().toLowerCase();
+
+        if (!correo) {
+            return res.status(400).json({
+                success: false,
+                error: 'El correo es obligatorio'
+            });
+        }
+
+        // Verificar si el correo existe
+        const [rows] = await poolPromise.execute(
+            'SELECT id_usuario, nombre FROM usuarios WHERE correo = ? LIMIT 1',
+            [correo]
+        );
+
+        if (!rows || rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                error: 'No existe una cuenta con este correo'
+            });
+        }
+
+        const usuario = rows[0];
+        const codigo = generarCodigo();
+
+        // Guardar código con expiración (10 minutos)
+        codigosRecuperacion.set(correo, {
+            codigo: codigo,
+            idUsuario: usuario.id_usuario,
+            nombre: usuario.nombre,
+            expira: Date.now() + (10 * 60 * 1000)
+        });
+
+        console.log(`📧 Código de recuperación para ${correo}: ${codigo}`);
+
+        // ENVIAR CORREO REAL
+        const correoEnviado = await enviarCorreoRecuperacion(
+            correo, 
+            usuario.nombre, 
+            codigo
+        );
+
+        if (correoEnviado) {
+            res.json({
+                success: true,
+                message: 'Código enviado al correo'
+            });
+        } else {
+            // Si falla el envío, devolver con debug
+            res.json({
+                success: true,
+                message: 'Código generado (error al enviar correo)',
+                codigo_debug: codigo
+            });
+        }
+
+    } catch (error) {
+        console.error('Error en solicitar recuperación:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Error al procesar solicitud'
+        });
+    }
+});
+
+// 2. Verificar código
+app.post('/api/recuperar/verificar', async (req, res) => {
+    try {
+        const correo = String(req.body?.correo || '').trim().toLowerCase();
+        const codigo = String(req.body?.codigo || '').trim();
+
+        if (!correo || !codigo) {
+            return res.status(400).json({
+                success: false,
+                error: 'Correo y código son obligatorios'
+            });
+        }
+
+        const datos = codigosRecuperacion.get(correo);
+
+        if (!datos) {
+            return res.status(400).json({
+                success: false,
+                error: 'No hay solicitud de recuperación para este correo'
+            });
+        }
+
+        if (Date.now() > datos.expira) {
+            codigosRecuperacion.delete(correo);
+            return res.status(400).json({
+                success: false,
+                error: 'El código ha expirado. Solicita uno nuevo.'
+            });
+        }
+
+        if (datos.codigo !== codigo) {
+            return res.status(400).json({
+                success: false,
+                error: 'Código incorrecto'
+            });
+        }
+
+        res.json({
+            success: true,
+            message: 'Código verificado correctamente',
+            idUsuario: datos.idUsuario
+        });
+
+    } catch (error) {
+        console.error('Error en verificar código:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Error al verificar código'
+        });
+    }
+});
+
+// 3. Cambiar contraseña
+app.post('/api/recuperar/cambiar', async (req, res) => {
+    try {
+        const correo = String(req.body?.correo || '').trim().toLowerCase();
+        const codigo = String(req.body?.codigo || '').trim();
+        const nuevaContrasena = String(req.body?.nuevaContrasena || '');
+
+        if (!correo || !codigo || !nuevaContrasena) {
+            return res.status(400).json({
+                success: false,
+                error: 'Todos los campos son obligatorios'
+            });
+        }
+
+        if (nuevaContrasena.length < 6) {
+            return res.status(400).json({
+                success: false,
+                error: 'La contraseña debe tener al menos 6 caracteres'
+            });
+        }
+
+        const datos = codigosRecuperacion.get(correo);
+
+        if (!datos || datos.codigo !== codigo) {
+            return res.status(400).json({
+                success: false,
+                error: 'Código inválido o expirado'
+            });
+        }
+
+        // Hashear nueva contraseña
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(nuevaContrasena, salt);
+
+        // Actualizar en BD
+        await poolPromise.execute(
+            'UPDATE usuarios SET contrasena = ?, fecha_actualizacion = NOW() WHERE correo = ?',
+            [hashedPassword, correo]
+        );
+
+        // Eliminar código usado
+        codigosRecuperacion.delete(correo);
+
+        console.log(`✅ Contraseña actualizada para ${correo}`);
+
+        res.json({
+            success: true,
+            message: 'Contraseña actualizada correctamente'
+        });
+
+    } catch (error) {
+        console.error('Error al cambiar contraseña:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Error al cambiar contraseña'
         });
     }
 });
@@ -972,14 +1243,19 @@ app.get('/api/panel/combinado/:id_usuario', async (req, res) => {
         // 1. ESTADÍSTICAS DEL USUARIO (siempre)
         const [cantidadesUsuario] = await poolPromise.execute(
             `SELECT 
-                c.nombre as categoria_nombre,
+                CASE 
+                    WHEN c.id_categoria = 1 THEN 'reciclable'
+                    WHEN c.id_categoria = 2 THEN 'organico'
+                    WHEN c.id_categoria = 3 THEN 'inorganico'
+                    WHEN c.id_categoria = 4 THEN 'peligroso'
+                    ELSE 'otro'
+                END as tipo,
                 COUNT(d.id_deteccion) as cantidad
             FROM categorias c
             LEFT JOIN detecciones d ON c.id_categoria = d.id_categoria 
                 AND d.id_usuario = ?
             WHERE c.id_categoria IN (1, 2, 3, 4)
-            GROUP BY c.id_categoria, c.nombre
-            ORDER BY c.id_categoria`,
+            GROUP BY c.id_categoria`,
             [id_usuario]
         );
 
@@ -1012,11 +1288,9 @@ app.get('/api/panel/combinado/:id_usuario', async (req, res) => {
         };
 
         cantidadesUsuario.forEach(item => {
-            const nombre = item.categoria_nombre.toLowerCase();
-            if (nombre.includes('recicl')) resultadoUsuario.reciclable = item.cantidad;
-            else if (nombre.includes('org')) resultadoUsuario.organico = item.cantidad;
-            else if (nombre.includes('inorg')) resultadoUsuario.inorganico = item.cantidad;
-            else if (nombre.includes('peligr')) resultadoUsuario.peligroso = item.cantidad;
+            if (item.tipo) {
+                resultadoUsuario[item.tipo] = item.cantidad;
+            }
         });
 
         const respuesta = {
@@ -1041,15 +1315,19 @@ app.get('/api/panel/combinado/:id_usuario', async (req, res) => {
             if (basurero && basurero.length > 0) {
                 const [deteccionesBasurero] = await poolPromise.execute(
                     `SELECT 
-                        c.nombre as categoria_nombre,
+                        CASE 
+                            WHEN c.id_categoria = 1 THEN 'reciclable'
+                            WHEN c.id_categoria = 2 THEN 'organico'
+                            WHEN c.id_categoria = 3 THEN 'inorganico'
+                            ELSE 'otro'
+                        END as tipo,
                         COUNT(d.id_deteccion) as total,
                         COALESCE(SUM(d.peso_gramos), 0) as peso_gramos
                     FROM categorias c
                     LEFT JOIN detecciones d ON c.id_categoria = d.id_categoria 
                         AND d.id_basurero = ?
                     WHERE c.id_categoria IN (1, 2, 3)
-                    GROUP BY c.id_categoria, c.nombre
-                    ORDER BY c.id_categoria`,
+                    GROUP BY c.id_categoria`,
                     [id_basurero]
                 );
 
@@ -1063,16 +1341,14 @@ app.get('/api/panel/combinado/:id_usuario', async (req, res) => {
                 };
 
                 deteccionesBasurero.forEach(det => {
-                    const nombre = det.categoria_nombre.toLowerCase();
-                    const pesoKg = det.peso_gramos / 1000;
-                    const porcentaje = Math.min(
-                        Math.round((pesoKg / capacidadPorCompartimento) * 100),
-                        100
-                    );
-
-                    if (nombre.includes('recicl')) llenadoBasurero.reciclable = porcentaje;
-                    else if (nombre.includes('org')) llenadoBasurero.organico = porcentaje;
-                    else if (nombre.includes('inorg')) llenadoBasurero.inorganico = porcentaje;
+                    if (det.tipo) {
+                        const pesoKg = det.peso_gramos / 1000;
+                        const porcentaje = Math.min(
+                            Math.round((pesoKg / capacidadPorCompartimento) * 100),
+                            100
+                        );
+                        llenadoBasurero[det.tipo] = porcentaje;
+                    }
                 });
 
                 respuesta.data.basurero = {
@@ -1085,6 +1361,7 @@ app.get('/api/panel/combinado/:id_usuario', async (req, res) => {
             }
         }
 
+        console.log('✅ Respuesta enviada:', JSON.stringify(respuesta, null, 2));
         res.json(respuesta);
 
     } catch (error) {
@@ -1096,6 +1373,101 @@ app.get('/api/panel/combinado/:id_usuario', async (req, res) => {
         });
     }
 });
+
+// ==================== OBTENER LLENADO ACTUAL DEL BASURERO ====================
+
+app.get('/api/basureros/:id_basurero/llenado', async (req, res) => {
+    try {
+        const { id_basurero } = req.params;
+
+        console.log(`📊 Obteniendo llenado del basurero ${id_basurero}`);
+
+        // 1. Obtener capacidad del basurero
+        const [basurero] = await poolPromise.execute(
+            `SELECT capacidad FROM basureros WHERE id_basurero = ? LIMIT 1`,
+            [id_basurero]
+        );
+
+        if (!basurero || basurero.length === 0) {
+            return res.status(404).json({
+                success: false,
+                error: 'Basurero no encontrado'
+            });
+        }
+
+        const capacidadTotal = basurero[0].capacidad || 1000; // kg
+        const capacidadPorCompartimento = capacidadTotal / 3; // 3 compartimentos
+
+        // 2. Obtener peso acumulado por categoría desde el último vaciado
+        // (por ahora sin tabla de vaciados, calculamos el total)
+        const [pesos] = await poolPromise.execute(
+            `SELECT 
+                CASE 
+                    WHEN c.id_categoria = 1 THEN 'reciclable'
+                    WHEN c.id_categoria = 2 THEN 'organico'
+                    WHEN c.id_categoria = 3 THEN 'inorganico'
+                    ELSE 'otro'
+                END as tipo,
+                COALESCE(SUM(d.peso_gramos), 0) as peso_total_gramos
+            FROM categorias c
+            LEFT JOIN detecciones d ON c.id_categoria = d.id_categoria 
+                AND d.id_basurero = ?
+            WHERE c.id_categoria IN (1, 2, 3)
+            GROUP BY c.id_categoria`,
+            [id_basurero]
+        );
+
+        // 3. Calcular porcentajes de llenado
+        const llenado = {
+            reciclable: 0,
+            organico: 0,
+            inorganico: 0
+        };
+
+        pesos.forEach(item => {
+            if (item.tipo) {
+                const pesoKg = item.peso_total_gramos / 1000;
+                const porcentaje = Math.min(
+                    Math.round((pesoKg / capacidadPorCompartimento) * 100),
+                    100
+                );
+                llenado[item.tipo] = porcentaje;
+            }
+        });
+
+        // 4. Calcular peso total
+        const pesoTotalKg = pesos.reduce((sum, item) => 
+            sum + (item.peso_total_gramos / 1000), 0
+        );
+
+        res.json({
+            success: true,
+            data: {
+                id_basurero: parseInt(id_basurero),
+                capacidad_total_kg: capacidadTotal,
+                peso_actual_kg: Math.round(pesoTotalKg * 100) / 100,
+                porcentaje_total: Math.min(
+                    Math.round((pesoTotalKg / capacidadTotal) * 100),
+                    100
+                ),
+                llenado: llenado,
+                estado: pesoTotalKg >= (capacidadTotal * 0.9) ? 'Crítico' : 
+                        pesoTotalKg >= (capacidadTotal * 0.7) ? 'Alto' : 
+                        pesoTotalKg >= (capacidadTotal * 0.4) ? 'Medio' : 'Bajo'
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Error al obtener llenado del basurero:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Error al obtener llenado del basurero',
+            details: error.message
+        });
+    }
+});
+
+
 
 // Obtener datos para el panel de estado
 app.get('/api/panel/estado/:id_usuario', async (req, res) => {
@@ -1167,22 +1539,39 @@ app.get('/api/panel/estado/:id_usuario', async (req, res) => {
 // ==================== HISTORIAL DETALLADO ====================
 
 // Obtener historial agrupado por tipo con estadísticas
+// ==================== HISTORIAL DETALLADO ====================
+// ==================== HISTORIAL DETALLADO ====================
+
+// Obtener historial agrupado por tipo con estadísticas
 app.get('/api/historial/resumen/:id_usuario', async (req, res) => {
     try {
         const { id_usuario } = req.params;
 
-        // Obtener resumen por cada tipo
+        console.log(`📊 Obteniendo resumen de historial para usuario ${id_usuario}`);
+
+        // Obtener resumen por cada categoría
         const [resumen] = await poolPromise.execute(
             `SELECT 
-                tipo_residuo,
-                COUNT(*) as cantidad,
-                AVG(confianza) as clasificacion_promedio,
-                MAX(fecha_deteccion) as ultima_accion
-            FROM detecciones
-            WHERE id_usuario = ?
-            GROUP BY tipo_residuo`,
+                c.id_categoria,
+                CASE 
+                    WHEN c.id_categoria = 1 THEN 'reciclable'
+                    WHEN c.id_categoria = 2 THEN 'organico'
+                    WHEN c.id_categoria = 3 THEN 'inorganico'
+                    ELSE 'otro'
+                END as tipo,
+                COUNT(d.id_deteccion) as cantidad,
+                AVG(d.confianza) as clasificacion_promedio,
+                MAX(d.fecha_deteccion) as ultima_accion
+            FROM categorias c
+            LEFT JOIN detecciones d ON c.id_categoria = d.id_categoria 
+                AND d.id_usuario = ?
+            WHERE c.id_categoria IN (1, 2, 3)
+            GROUP BY c.id_categoria, c.nombre
+            ORDER BY c.id_categoria`,
             [id_usuario]
         );
+
+        console.log('📋 Datos obtenidos:', resumen);
 
         // Formatear respuesta para cada tipo
         const resultado = {
@@ -1206,22 +1595,27 @@ app.get('/api/historial/resumen/:id_usuario', async (req, res) => {
             }
         };
 
+        // Mapear resultados
         resumen.forEach(item => {
-            const tipo = item.tipo_residuo;
-            resultado[tipo] = {
-                cantidad: item.cantidad,
-                llenado: calcularLlenado(item.cantidad),
-                clasificacion: Math.round(item.clasificacion_promedio || 0),
-                ultimaAccion: formatearHora(item.ultima_accion)
-            };
+            const tipo = item.tipo;
+            if (tipo && resultado[tipo]) {
+                resultado[tipo] = {
+                    cantidad: item.cantidad || 0,
+                    llenado: calcularLlenado(item.cantidad || 0),
+                    clasificacion: Math.round(item.clasificacion_promedio || 0),
+                    ultimaAccion: formatearHora(item.ultima_accion)
+                };
+            }
         });
+
+        console.log('✅ Resumen generado:', resultado);
 
         res.json({
             success: true,
             data: resultado
         });
     } catch (error) {
-        console.error('Error al obtener resumen de historial:', error);
+        console.error('❌ Error al obtener resumen de historial:', error);
         res.status(500).json({
             success: false,
             error: 'Error al obtener resumen de historial',
@@ -1229,6 +1623,47 @@ app.get('/api/historial/resumen/:id_usuario', async (req, res) => {
         });
     }
 });
+
+// Función auxiliar para calcular nivel de llenado
+function calcularLlenado(cantidad) {
+    if (cantidad === 0) return 'Vacío';
+    if (cantidad < 10) return 'Bajo';
+    if (cantidad < 20) return 'Medio';
+    return 'Alto';
+}
+
+// Función auxiliar para formatear hora
+function formatearHora(fecha) {
+    if (!fecha) return null;
+    try {
+        const d = new Date(fecha);
+        const horas = d.getHours().toString().padStart(2, '0');
+        const minutos = d.getMinutes().toString().padStart(2, '0');
+        const ampm = d.getHours() >= 12 ? 'PM' : 'AM';
+        return `${horas}:${minutos} ${ampm}`;
+    } catch (e) {
+        return null;
+    }
+}
+
+// Función auxiliar para calcular nivel de llenado
+function calcularLlenado(cantidad) {
+    if (cantidad === 0) return 'Vacío';
+    if (cantidad < 10) return 'Bajo';
+    if (cantidad < 20) return 'Medio';
+    return 'Alto';
+}
+
+// Función auxiliar para formatear hora
+function formatearHora(fecha) {
+    if (!fecha) return null;
+    const d = new Date(fecha);
+    const horas = d.getHours().toString().padStart(2, '0');
+    const minutos = d.getMinutes().toString().padStart(2, '0');
+    const ampm = d.getHours() >= 12 ? 'PM' : 'AM';
+    return `${horas}:${minutos} ${ampm}`;
+}
+
 
 // Función auxiliar para calcular nivel de llenado
 function calcularLlenado(cantidad) {
@@ -1331,5 +1766,326 @@ process.on('SIGTERM', async () => {
     } catch (err) {
         console.error('Error al cerrar:', err);
         process.exit(1);
+    }
+});
+
+// ==================== HISTORIAL DEL BASURERO ====================
+
+// Obtener historial de detecciones de un basurero específico
+app.get('/api/basureros/:id_basurero/historial', async (req, res) => {
+    try {
+        const { id_basurero } = req.params;
+        const { limit = 50 } = req.query;
+
+        console.log(`📊 Obteniendo historial del basurero ${id_basurero}`);
+
+        const [detecciones] = await poolPromise.execute(
+            `SELECT 
+                d.id_deteccion,
+                d.nombre_objeto,
+                d.confianza,
+                d.peso_gramos,
+                d.puntos_ganados,
+                d.fecha_deteccion,
+                c.nombre as categoria_nombre,
+                c.id_categoria,
+                u.nombre as usuario_nombre,
+                u.apellido as usuario_apellido
+            FROM detecciones d
+            LEFT JOIN categorias c ON d.id_categoria = c.id_categoria
+            LEFT JOIN usuarios u ON d.id_usuario = u.id_usuario
+            WHERE d.id_basurero = ?
+            ORDER BY d.fecha_deteccion DESC
+            LIMIT ?`,
+            [id_basurero, parseInt(limit)]
+        );
+
+        // Estadísticas rápidas
+        const [stats] = await poolPromise.execute(
+            `SELECT 
+                COUNT(*) as total_detecciones,
+                AVG(confianza) as confianza_promedio,
+                SUM(puntos_ganados) as puntos_totales
+            FROM detecciones
+            WHERE id_basurero = ?`,
+            [id_basurero]
+        );
+
+        res.json({
+            success: true,
+            total: detecciones.length,
+            estadisticas: {
+                total_detecciones: stats[0].total_detecciones || 0,
+                confianza_promedio: Math.round(stats[0].confianza_promedio || 0),
+                puntos_totales: stats[0].puntos_totales || 0
+            },
+            data: detecciones
+        });
+
+    } catch (error) {
+        console.error('❌ Error al obtener historial del basurero:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Error al obtener historial del basurero'
+        });
+    }
+});
+
+// ==================== ESTADÍSTICAS DETALLADAS DEL USUARIO ====================
+
+app.get('/api/usuarios/:id_usuario/estadisticas-detalladas', async (req, res) => {
+    try {
+        const { id_usuario } = req.params;
+
+        console.log(`📊 Estadísticas detalladas del usuario ${id_usuario}`);
+
+        // 1. Por categoría
+        const [porCategoria] = await poolPromise.execute(
+            `SELECT 
+                c.id_categoria,
+                c.nombre as categoria,
+                COUNT(d.id_deteccion) as cantidad,
+                AVG(d.confianza) as confianza_promedio,
+                SUM(d.puntos_ganados) as puntos
+            FROM categorias c
+            LEFT JOIN detecciones d ON c.id_categoria = d.id_categoria 
+                AND d.id_usuario = ?
+            WHERE c.id_categoria IN (1, 2, 3)
+            GROUP BY c.id_categoria, c.nombre`,
+            [id_usuario]
+        );
+
+        // 2. Por día (últimos 7 días)
+        const [porDia] = await poolPromise.execute(
+            `SELECT 
+                DATE(fecha_deteccion) as fecha,
+                COUNT(*) as cantidad,
+                SUM(puntos_ganados) as puntos
+            FROM detecciones
+            WHERE id_usuario = ?
+            AND fecha_deteccion >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+            GROUP BY DATE(fecha_deteccion)
+            ORDER BY fecha DESC`,
+            [id_usuario]
+        );
+
+        // 3. Por semana (últimas 4 semanas)
+        const [porSemana] = await poolPromise.execute(
+            `SELECT 
+                YEARWEEK(fecha_deteccion, 1) as semana,
+                MIN(DATE(fecha_deteccion)) as inicio_semana,
+                COUNT(*) as cantidad,
+                SUM(puntos_ganados) as puntos
+            FROM detecciones
+            WHERE id_usuario = ?
+            AND fecha_deteccion >= DATE_SUB(CURDATE(), INTERVAL 4 WEEK)
+            GROUP BY YEARWEEK(fecha_deteccion, 1)
+            ORDER BY semana DESC`,
+            [id_usuario]
+        );
+
+        // 4. Totales generales
+        const [totales] = await poolPromise.execute(
+            `SELECT 
+                COUNT(*) as total_clasificaciones,
+                SUM(puntos_ganados) as puntos_totales,
+                AVG(confianza) as confianza_promedio,
+                MAX(fecha_deteccion) as ultima_deteccion
+            FROM detecciones
+            WHERE id_usuario = ?`,
+            [id_usuario]
+        );
+
+        // 5. Racha actual (días consecutivos)
+        const [racha] = await poolPromise.execute(
+            `SELECT COUNT(DISTINCT DATE(fecha_deteccion)) as dias_activos
+            FROM detecciones
+            WHERE id_usuario = ?
+            AND fecha_deteccion >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)`,
+            [id_usuario]
+        );
+
+        res.json({
+            success: true,
+            data: {
+                totales: {
+                    clasificaciones: totales[0].total_clasificaciones || 0,
+                    puntos: totales[0].puntos_totales || 0,
+                    confianza_promedio: Math.round(totales[0].confianza_promedio || 0),
+                    ultima_deteccion: totales[0].ultima_deteccion
+                },
+                por_categoria: porCategoria,
+                por_dia: porDia,
+                por_semana: porSemana,
+                dias_activos_mes: racha[0].dias_activos || 0
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Error al obtener estadísticas'
+        });
+    }
+});
+
+// ==================== ESTADÍSTICAS DETALLADAS DEL BASURERO ====================
+
+app.get('/api/basureros/:id_basurero/estadisticas-detalladas', async (req, res) => {
+    try {
+        const { id_basurero } = req.params;
+
+        console.log(`📊 Estadísticas detalladas del basurero ${id_basurero}`);
+
+        // Info del basurero
+        const [basurero] = await poolPromise.execute(
+            `SELECT nombre, codigo, capacidad, ubicacion FROM basureros WHERE id_basurero = ?`,
+            [id_basurero]
+        );
+
+        if (!basurero || basurero.length === 0) {
+            return res.status(404).json({ success: false, error: 'Basurero no encontrado' });
+        }
+
+        // Por categoría
+        const [porCategoria] = await poolPromise.execute(
+            `SELECT 
+                c.id_categoria,
+                c.nombre as categoria,
+                COUNT(d.id_deteccion) as cantidad,
+                COALESCE(SUM(d.peso_gramos), 0) as peso_total_gramos,
+                AVG(d.confianza) as confianza_promedio
+            FROM categorias c
+            LEFT JOIN detecciones d ON c.id_categoria = d.id_categoria 
+                AND d.id_basurero = ?
+            WHERE c.id_categoria IN (1, 2, 3)
+            GROUP BY c.id_categoria, c.nombre`,
+            [id_basurero]
+        );
+
+        // Por día (últimos 7 días)
+        const [porDia] = await poolPromise.execute(
+            `SELECT 
+                DATE(fecha_deteccion) as fecha,
+                COUNT(*) as cantidad
+            FROM detecciones
+            WHERE id_basurero = ?
+            AND fecha_deteccion >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+            GROUP BY DATE(fecha_deteccion)
+            ORDER BY fecha DESC`,
+            [id_basurero]
+        );
+
+        // Usuarios que han usado este basurero
+        const [usuarios] = await poolPromise.execute(
+            `SELECT 
+                u.id_usuario,
+                u.nombre,
+                u.apellido,
+                COUNT(d.id_deteccion) as clasificaciones
+            FROM usuarios u
+            INNER JOIN detecciones d ON u.id_usuario = d.id_usuario
+            WHERE d.id_basurero = ?
+            GROUP BY u.id_usuario, u.nombre, u.apellido
+            ORDER BY clasificaciones DESC
+            LIMIT 10`,
+            [id_basurero]
+        );
+
+        // Totales
+        const [totales] = await poolPromise.execute(
+            `SELECT 
+                COUNT(*) as total_detecciones,
+                COUNT(DISTINCT id_usuario) as usuarios_unicos,
+                AVG(confianza) as confianza_promedio
+            FROM detecciones
+            WHERE id_basurero = ?`,
+            [id_basurero]
+        );
+
+        // Calcular llenado
+        const capacidad = basurero[0].capacidad || 50;
+        const capacidadPorCompartimento = capacidad / 3;
+
+        const llenado = {
+            reciclable: 0,
+            organico: 0,
+            inorganico: 0
+        };
+
+        porCategoria.forEach(cat => {
+            const pesoKg = cat.peso_total_gramos / 1000;
+            const porcentaje = Math.min(Math.round((pesoKg / capacidadPorCompartimento) * 100), 100);
+            
+            if (cat.id_categoria === 1) llenado.reciclable = porcentaje;
+            if (cat.id_categoria === 2) llenado.organico = porcentaje;
+            if (cat.id_categoria === 3) llenado.inorganico = porcentaje;
+        });
+
+        res.json({
+            success: true,
+            data: {
+                basurero: basurero[0],
+                totales: {
+                    detecciones: totales[0].total_detecciones || 0,
+                    usuarios_unicos: totales[0].usuarios_unicos || 0,
+                    confianza_promedio: Math.round(totales[0].confianza_promedio || 0)
+                },
+                llenado: llenado,
+                por_categoria: porCategoria,
+                por_dia: porDia,
+                top_usuarios: usuarios
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Error al obtener estadísticas del basurero'
+        });
+    }
+});
+
+// ==================== RANKING DE USUARIOS ====================
+
+app.get('/api/ranking', async (req, res) => {
+    try {
+        const { limit = 10 } = req.query;
+
+        const [ranking] = await poolPromise.execute(
+            `SELECT 
+                u.id_usuario,
+                u.nombre,
+                u.apellido,
+                COUNT(d.id_deteccion) as clasificaciones,
+                SUM(d.puntos_ganados) as puntos_totales,
+                AVG(d.confianza) as confianza_promedio
+            FROM usuarios u
+            LEFT JOIN detecciones d ON u.id_usuario = d.id_usuario
+            GROUP BY u.id_usuario, u.nombre, u.apellido
+            HAVING clasificaciones > 0
+            ORDER BY puntos_totales DESC
+            LIMIT ?`,
+            [parseInt(limit)]
+        );
+
+        res.json({
+            success: true,
+            total: ranking.length,
+            data: ranking.map((user, index) => ({
+                posicion: index + 1,
+                ...user,
+                confianza_promedio: Math.round(user.confianza_promedio || 0)
+            }))
+        });
+
+    } catch (error) {
+        console.error('❌ Error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Error al obtener ranking'
+        });
     }
 });
